@@ -92,7 +92,7 @@ CONSOLIDATION_ENTITIES = [
     "Contact_Fournisseur", "Entite_Societe", "Fiche_Client",
     "Fiche_Collectifs_Divers", "Fiche_Compte_Tresorie", "Fiche_Fournisseur",
     "Fiche_Salarie", "Guide_de_saisie", "IMMOBILISATION", "Journal_Comptable",
-    "Plan_Comptable", "RIB_Par_Typologie_Analytique",
+    "Plan_Comptable", "RIB_Par_Typologie",
     "Section_analytique_Concat_sousPlan",
 ]
 
@@ -117,7 +117,7 @@ ENTITY_DEDUP_KEYS: dict = {
     "IMMOBILISATION": [],
     "Journal_Comptable": [],
     "Plan_Comptable": [],
-    "RIB_Par_Typologie_Analytique": [],
+    "RIB_Par_Typologie": [],
     "Section_analytique_Concat_sousPlan": [],
 }
 
