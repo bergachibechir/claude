@@ -1242,6 +1242,28 @@ def dedupe_dataframe(df, dedup_keys: list):
     return kept, removed, []
 
 
+# Localise les fichiers finaux d'une entite/base pour la consolidation, avec repli en cascade :
+# regles de gestion du run courant > transformation du run courant > regles de gestion (dernier
+# resultat connu) > sortie standard (dernier resultat connu). Utilise meme apres une execution en
+# erreur, pour ne jamais priver la consolidation d'une base dont un resultat existe deja.
+def _resolve_consolidation_files_for_entity(db_name: str, entity_id: str, run_folder: Path) -> list:
+    def _csv_xlsx(folder: Path) -> list:
+        if not folder.exists():
+            return []
+        return sorted(p for p in folder.glob("*") if p.is_file() and p.suffix.lower() in (".csv", ".xlsx"))
+
+    for folder in (
+        run_folder / "regles",
+        run_folder / "transformation",
+        OUTPUT_RULES_DIR / db_name / entity_id,
+        OUTPUT_DIR / db_name / entity_id,
+    ):
+        files = _csv_xlsx(folder)
+        if files:
+            return files
+    return []
+
+
 # Consolide, pour une entite eligible, les fichiers finaux de toutes les bases en un seul fichier + dedoublonnage.
 def consolidate_entity_across_bases(entity_id: str, files_by_db: dict, out_root: Path, logs: list) -> dict:
     import pandas as pd
@@ -1249,15 +1271,24 @@ def consolidate_entity_across_bases(entity_id: str, files_by_db: dict, out_root:
     dest_dir = out_root / CONSOLIDATION_DIRNAME / entity_clean
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    frames    = []
-    any_xlsx  = False
-    csv_sep   = ";"
+    frames      = []
+    any_xlsx    = False
+    csv_sep     = ";"
+    empty_files = 0
     for db_name, files in files_by_db.items():
         for f in files:
             try:
                 df, sep = read_table_preserving_text(f)
+            except pd.errors.EmptyDataError:
+                logs.append(f"  [CONSOLIDATION][WARN] {f.name} ({db_name}) : fichier vide — ignore (pas une erreur).")
+                empty_files += 1
+                continue
             except Exception as exc:
                 logs.append(f"  [CONSOLIDATION][WARN] Lecture impossible {f.name} ({db_name}) : {exc}")
+                continue
+            if df.empty:
+                logs.append(f"  [CONSOLIDATION][WARN] {f.name} ({db_name}) : 0 ligne de donnees — ignore (pas une erreur).")
+                empty_files += 1
                 continue
             if f.suffix.lower() == ".xlsx":
                 any_xlsx = True
@@ -1268,8 +1299,11 @@ def consolidate_entity_across_bases(entity_id: str, files_by_db: dict, out_root:
             frames.append(df)
 
     if not frames:
-        logs.append(f"  [CONSOLIDATION][WARN] {entity_id} : aucun fichier source lisible, consolidation ignoree.")
-        return {"entity": entity_id, "status": "skip"}
+        logs.append(
+            f"  [CONSOLIDATION][WARN] {entity_id} : aucune ligne de donnees disponible "
+            f"({empty_files} fichier(s) vide(s)) — consolidation ignoree pour cette entite."
+        )
+        return {"entity": entity_id, "status": "skip", "empty_files": empty_files}
 
     consolidated = pd.concat(frames, ignore_index=True, sort=False)
     total_rows   = len(consolidated)
@@ -1563,15 +1597,19 @@ def run_advanced_pipeline(job_id: str, cfg: dict, databases: list,
                     job["logs"].append(f"  [WARN] Regles ignorees : {exc}")
 
             # ── Collecte pour la consolidation multi-bases (entites eligibles uniquement) ──
-            if entity_ok and is_consolidation_entity(entity_id):
-                regles_out = run_folder / "regles"
-                final_files = []
-                if regles_out.exists():
-                    final_files = [p for p in regles_out.glob("*") if p.is_file() and p.suffix.lower() in (".csv", ".xlsx")]
-                if not final_files:
-                    final_files = [p for p in transf_out.glob("*") if p.is_file() and p.suffix.lower() in (".csv", ".xlsx")]
+            # Toujours tentee, meme si l'extraction/transformation de cette execution est en
+            # erreur : le pipeline ne s'arrete pas, et on reutilise alors les derniers fichiers
+            # deja disponibles (regles de gestion > sortie standard) pour ne pas priver la
+            # consolidation d'une base a cause d'un incident sur une autre.
+            if is_consolidation_entity(entity_id):
+                final_files = _resolve_consolidation_files_for_entity(db_name, entity_id, run_folder)
                 if final_files:
                     consolidation_sources.setdefault(entity_id, {})[db_name] = final_files
+                    if not entity_ok:
+                        job["logs"].append(
+                            f"  [CONSOLIDATION][WARN] {entity_id}/{db_name} : execution en erreur — "
+                            f"fichiers deja disponibles reutilises pour la consolidation."
+                        )
                 else:
                     job["logs"].append(f"  [CONSOLIDATION][WARN] {entity_id} : aucun fichier final trouve pour {db_name}.")
 
